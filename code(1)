@@ -1,0 +1,128 @@
+#include <Arduino.h>
+
+// --- PIN DEFINITIONS ---
+// 10 Analog Sensor Pins (ESP32 ADC1 Pins)
+const int SENSOR_PINS[10] = {36, 39, 34, 35, 32, 33, 25, 26, 27, 14};
+
+// TB6612FNG Motor Driver Pins
+const int PWMA = 18;
+const int AIN1 = 5;
+const int AIN2 = 17;
+const int PWMB = 16;
+const int BIN1 = 4;
+const int BIN2 = 0;
+
+// --- PID & SPEED PARAMETERS ---
+float Kp = 0.08;   // Adjust ito kapag kulang o sobra ang liko
+float Kd = 0.4;    // Adjust ito kapag gewang-gewang ang takbo
+int baseSpeed = 180; // Takbo ng motors sa diretso (0 - 255)
+int maxSpeed = 250;  // Maximum speed limit
+
+// Calibration arrays
+int sensorMin[10];
+int sensorMax[10];
+int lastError = 0;
+
+// --- MOTOR CONTROL FUNCTION ---
+void setMotors(int leftSpeed, int rightSpeed) {
+  // Left Motor Direction
+  if (leftSpeed >= 0) {
+    digitalWrite(AIN1, HIGH);
+    digitalWrite(AIN2, LOW);
+  } else {
+    digitalWrite(AIN1, LOW);
+    digitalWrite(AIN2, HIGH);
+    leftSpeed = -leftSpeed;
+  }
+
+  // Right Motor Direction
+  if (rightSpeed >= 0) {
+    digitalWrite(BIN1, HIGH);
+    digitalWrite(BIN2, LOW);
+  } else {
+    digitalWrite(BIN1, LOW);
+    digitalWrite(BIN2, HIGH);
+    rightSpeed = -rightSpeed;
+  }
+
+  // Speed Limit (0 to 255)
+  leftSpeed = constrain(leftSpeed, 0, maxSpeed);
+  rightSpeed = constrain(rightSpeed, 0, maxSpeed);
+
+  // Write PWM
+  analogWrite(PWMA, leftSpeed);
+  analogWrite(PWMB, rightSpeed);
+}
+
+// --- SETUP ---
+void setup() {
+  Serial.begin(115200);
+
+  // Setup Motor Driver Pins
+  pinMode(PWMA, OUTPUT);
+  pinMode(AIN1, OUTPUT);
+  pinMode(AIN2, OUTPUT);
+  pinMode(PWMB, OUTPUT);
+  pinMode(BIN1, OUTPUT);
+  pinMode(BIN2, OUTPUT);
+
+  // Initialize Sensor Calibration Array
+  for (int i = 0; i < 10; i++) {
+    sensorMin[i] = 4095;
+    sensorMax[i] = 0;
+  }
+
+  // AUTO-CALIBRATION SEQUENCE (5 SECONDS)
+  // Habang nagca-calibrate, igala ang robot sa ibabaw ng itim at puting linya
+  Serial.println("Calibrating sensors... Move robot across track!");
+  uint32_t startTime = millis();
+  while (millis() - startTime < 5000) {
+    for (int i = 0; i < 10; i++) {
+      int val = analogRead(SENSOR_PINS[i]);
+      if (val < sensorMin[i]) sensorMin[i] = val;
+      if (val > sensorMax[i]) sensorMax[i] = val;
+    }
+    delay(10);
+  }
+  Serial.println("Calibration complete!");
+  delay(1000);
+}
+
+// --- MAIN LOOP ---
+void loop() {
+  long weightedSum = 0;
+  long totalValue = 0;
+
+  // Sensor weights: -4500 (pinakakaliwa) to +4500 (pinakakanan)
+  int weights[10] = {-4500, -3500, -2500, -1500, -500, 500, 1500, 2500, 3500, 4500};
+
+  // Read and normalize sensor values (0 = White, 1000 = Black line)
+  for (int i = 0; i < 10; i++) {
+    int rawVal = analogRead(SENSOR_PINS[i]);
+    int normVal = map(rawVal, sensorMin[i], sensorMax[i], 0, 1000);
+    normVal = constrain(normVal, 0, 1000);
+
+    weightedSum += (long)normVal * weights[i];
+    totalValue += normVal;
+  }
+
+  // Compute Position Error
+  int error = 0;
+  if (totalValue > 500) { // May nare-read na linya
+    error = weightedSum / totalValue;
+  } else {
+    // Kung mawala sa linya, i-maintain ang huling gawi
+    error = (lastError > 0) ? 4500 : -4500;
+  }
+
+  // PID Calculation
+  int motorSpeedCorrection = (Kp * error) + (Kd * (error - lastError));
+  lastError = error;
+
+  // Compute Left and Right Speeds
+  int leftMotorSpeed = baseSpeed + motorSpeedCorrection;
+  int rightMotorSpeed = baseSpeed - motorSpeedCorrection;
+
+  // Set Motor Speeds
+  setMotors(leftMotorSpeed, rightMotorSpeed);
+}
