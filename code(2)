@@ -1,0 +1,182 @@
+
+// Motor Driver Pins (TB6612FNG)
+const int PWMA = 25;  // Left Motor Speed (PWM)[cite: 7]
+const int AIN1 = 26;  // Left Motor Direction 1[cite: 7]
+const int AIN2 = 27;  // Left Motor Direction 2[cite: 7]
+
+const int PWMB = 14;  // Right Motor Speed (PWM)[cite: 7]
+const int BIN1 = 33;  // Right Motor Direction 1[cite: 7]
+const int BIN2 = 13;  // Right Motor Direction 2[cite: 7]
+
+// 5-Channel IR Sensor Pins
+const int SENSOR_PINS[5] = {36, 39, 34, 35, 32}; // OUT1 to OUT5[cite: 8]
+
+// PWM Settings for ESP32 (ledc)
+const int PWM_FREQ = 5000;
+const int PWM_RES = 8; // 0 - 255 speed range
+
+// PID & SPEED CONFIGURATION
+// Motor Speed Constants
+const int BASE_SPEED = 150; // Dynamic base speed (0-255)
+const int MAX_SPEED  = 220; // Maximum motor speed limit
+
+// PID Tuning Constants (adjust na lang for calibration)
+float Kp = 0.04;
+float Ki = 0.00;
+float Kd = 0.25;
+
+// Global PID Variables
+int lastError = 0;
+float integral = 0;
+
+// Sensor Calibration Variables
+int sensorMin[5] = {4095, 4095, 4095, 4095, 4095};
+int sensorMax[5] = {0, 0, 0, 0, 0};
+
+// Function Prototypes
+void calibrateSensors();
+int readLinePosition();
+void setMotorSpeeds(int leftSpeed, int rightSpeed);
+void stopMotors();
+
+
+// SETUP FUNCTION
+void setup() {
+  Serial.begin(115200);
+
+  // Setup Motor Control Pins
+  pinMode(AIN1, OUTPUT);
+  pinMode(AIN2, OUTPUT);
+  pinMode(BIN1, OUTPUT);
+  pinMode(BIN2, OUTPUT);
+
+  // Configure ESP32 PWM Channels
+  ledcAttach(PWMA, PWM_FREQ, PWM_RES);
+  ledcAttach(PWMB, PWM_FREQ, PWM_RES);
+
+  // Setup Sensor Pins
+  for (int i = 0; i < 5; i++) {
+    pinMode(SENSOR_PINS[i], INPUT);
+  }
+
+  // Auto Calibration (5 Seconds)
+  Serial.println("Starting Sensor Calibration... Move sensors over black and white lines!");
+  calibrateSensors();
+  Serial.println("Calibration Done! Starting main loop in 2 seconds...");
+  delay(2000);
+}
+
+
+// MAIN LOOP FUNCTION
+void loop() {
+  // Read position of the black line (Target position = 2000 for middle sensor)
+  int position = readLinePosition();
+  
+  // Calculate Error (Center is 2000)
+  int error = position - 2000;
+
+  // PID Calculations
+  integral += error;
+  float derivative = error - lastError;
+  float motorSpeedAdjustment = (Kp * error) + (Ki * integral) + (Kd * derivative);
+
+  lastError = error;
+
+  // Calculate left and right motor speeds
+  int leftMotorSpeed  = BASE_SPEED + motorSpeedAdjustment;
+  int rightMotorSpeed = BASE_SPEED - motorSpeedAdjustment;
+
+  // Constrain speeds within bounds [0, MAX_SPEED]
+  leftMotorSpeed  = constrain(leftMotorSpeed, 0, MAX_SPEED);
+  rightMotorSpeed = constrain(rightMotorSpeed, 0, MAX_SPEED);
+
+  // Apply motor speeds
+  setMotorSpeeds(leftMotorSpeed, rightMotorSpeed);
+
+  delay(5); // Small control loop delay
+}
+
+//  HELPER FUNCTIONS
+// Auto Sensor Calibration (Runs in setup)
+void calibrateSensors() {
+  unsigned long startTime = millis();
+  
+  while (millis() - startTime < 5000) { // Calibrate for 5 seconds
+    for (int i = 0; i < 5; i++) {
+      int val = analogRead(SENSOR_PINS[i]);
+      if (val < sensorMin[i]) sensorMin[i] = val;
+      if (val > sensorMax[i]) sensorMax[i] = val;
+    }
+    delay(10);
+  }
+}
+
+// Read line position (Weighted Average method)
+int readLinePosition() {
+  long weightedSum = 0;
+  long sum = 0;
+  bool lineDetected = false;
+
+  for (int i = 0; i < 5; i++) {
+    int rawVal = analogRead(SENSOR_PINS[i]);
+    
+    // Normalize reading between 0 and 1000 based sa calibration
+    int normalizedVal = map(rawVal, sensorMin[i], sensorMax[i], 0, 1000);
+    normalizedVal = constrain(normalizedVal, 0, 1000);
+
+    // Invert values if black line gives higher analog reading
+    int value = 1000 - normalizedVal;
+
+    if (value > 200) { // Threshold to verify line detection
+      lineDetected = true;
+    }
+
+    weightedSum += (long)value * (i * 1000);
+    sum += value;
+  }
+
+  // Handle line loss (Keep turning in direction of last known error)
+  if (!lineDetected) {
+    if (lastError < 0) return 0;       // Hard Left
+    else return 4000;                  // Hard Right
+  }
+
+  return weightedSum / sum; // Center sensor returns 2000
+}
+
+// Drive Motors
+void setMotorSpeeds(int leftSpeed, int rightSpeed) {
+  // Left Motor Direction
+  if (leftSpeed >= 0) {
+    digitalWrite(AIN1, HIGH);
+    digitalWrite(AIN2, LOW);
+  } else {
+    digitalWrite(AIN1, LOW);
+    digitalWrite(AIN2, HIGH);
+    leftSpeed = -leftSpeed;
+  }
+
+  // Right Motor Direction
+  if (rightSpeed >= 0) {
+    digitalWrite(BIN1, HIGH);
+    digitalWrite(BIN2, LOW);
+  } else {
+    digitalWrite(BIN1, LOW);
+    digitalWrite(BIN2, HIGH);
+    rightSpeed = -rightSpeed;
+  }
+
+  // Set Speeds via PWM
+  ledcWrite(PWMA, leftSpeed);
+  ledcWrite(PWMB, rightSpeed);
+}
+
+// Stop Both Motors
+void stopMotors() {
+  digitalWrite(AIN1, LOW);
+  digitalWrite(AIN2, LOW);
+  digitalWrite(BIN1, LOW);
+  digitalWrite(BIN2, LOW);
+  ledcWrite(PWMA, 0);
+  ledcWrite(PWMB, 0);
+}
