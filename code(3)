@@ -1,0 +1,187 @@
+// 1. PIN DEFINITIONS
+// Left Motor (L298N)
+const int ENA = 25; // Left motor speed (PWM)
+const int IN1 = 26; // Left motor direction
+const int IN2 = 27; // Left motor direction
+
+// Right Motor (L298N)
+const int ENB = 14; // Right motor speed (PWM)
+const int IN3 = 33; // Right motor direction
+const int IN4 = 13; // Right motor direction
+
+// 5-Channel Analog IR Sensor Pins (OUT1 to OUT5: Left -> Right)
+const int SENSORS[5] = {36, 39, 34, 35, 32};
+
+// PWM Settings for ESP32 (Arduino ESP32 Core v3.x)
+const int PWM_FREQ = 5000;
+const int PWM_RES  = 8; // 0 to 255 speed range
+
+
+// 2. PID & SPEED CONFIGURATION
+// Motor Speed Settings (Note: L298N drops ~2V, so adjust speed if motors need more push)
+int BASE_SPEED = 160; // Dynamic base speed (0 - 255)
+int MAX_SPEED  = 230; // Maximum speed limit
+
+// PID Constants (Initial Tuning)
+float Kp = 0.04;
+float Ki = 0.00;
+float Kd = 0.25;
+
+// PID Tracking Variables
+int lastError = 0;
+float integral = 0;
+
+// Sensor Auto-Calibration Ranges
+int sensorMin[5] = {4095, 4095, 4095, 4095, 4095};
+int sensorMax[5] = {0, 0, 0, 0, 0};
+
+// Function Declarations
+void calibrateSensors();
+int readLinePosition();
+void setMotorSpeeds(int leftSpeed, int rightSpeed);
+void stopMotors();
+
+
+// 3. SETUP (RUNS ONCE AT POWER ON)
+void setup() {
+  Serial.begin(115200);
+
+  // Setup Motor Direction Pins
+  pinMode(IN1, OUTPUT);
+  pinMode(IN2, OUTPUT);
+  pinMode(IN3, OUTPUT);
+  pinMode(IN4, OUTPUT);
+
+  // Attach PWM Channels to ENA & ENB
+  ledcAttach(ENA, PWM_FREQ, PWM_RES);
+  ledcAttach(ENB, PWM_FREQ, PWM_RES);
+
+  // Setup Sensor Pins
+  for (int i = 0; i < 5; i++) {
+    pinMode(SENSORS[i], INPUT);
+  }
+
+  // Self-Calibration Phase (5 Seconds)
+  Serial.println("--- SENSOR CALIBRATION STARTING ---");
+  Serial.println("Move/sway the sensors over the black and white lines!");
+  calibrateSensors();
+  Serial.println("--- CALIBRATION COMPLETED ---");
+  
+  delay(2000); // 2-second buffer before running
+}
+
+
+// 4. MAIN LOOP (PID CONTROL)
+void loop() {
+  // Read line position (Target = 2000 for middle sensor P34 / OUT3)
+  int position = readLinePosition();
+  
+  // Calculate Error (Center is 2000)
+  int error = position - 2000;
+
+  // Calculate PID Output
+  integral += error;
+  float derivative = error - lastError;
+  float motorAdjustment = (Kp * error) + (Ki * integral) + (Kd * derivative);
+
+  lastError = error;
+
+  // Calculate Left & Right Motor Speeds
+  int leftMotorSpeed  = BASE_SPEED + motorAdjustment;
+  int rightMotorSpeed = BASE_SPEED - motorAdjustment;
+
+  // Clamp Speeds to Valid Range [0, MAX_SPEED]
+  leftMotorSpeed  = constrain(leftMotorSpeed, 0, MAX_SPEED);
+  rightMotorSpeed = constrain(rightMotorSpeed, 0, MAX_SPEED);
+
+  // Apply PWM speeds to L298N
+  setMotorSpeeds(leftMotorSpeed, rightMotorSpeed);
+
+  delay(5); // Small loop delay for stability
+}
+
+
+// 5. HELPER FUNCTIONS
+// Auto-Calibration Function
+void calibrateSensors() {
+  unsigned long startTime = millis();
+  
+  while (millis() - startTime < 5000) {
+    for (int i = 0; i < 5; i++) {
+      int val = analogRead(SENSORS[i]);
+      if (val < sensorMin[i]) sensorMin[i] = val;
+      if (val > sensorMax[i]) sensorMax[i] = val;
+    }
+    delay(10);
+  }
+}
+
+// Read Line Position using Weighted Average
+int readLinePosition() {
+  long weightedSum = 0;
+  long sum = 0;
+  bool lineDetected = false;
+
+  for (int i = 0; i < 5; i++) {
+    int rawVal = analogRead(SENSORS[i]);
+    
+    // Normalize reading between 0 and 1000
+    int normalizedVal = map(rawVal, sensorMin[i], sensorMax[i], 0, 1000);
+    normalizedVal = constrain(normalizedVal, 0, 1000);
+
+    // Invert values if dark line returns higher reading
+    int value = 1000 - normalizedVal;
+
+    if (value > 200) { // Threshold to confirm line detection
+      lineDetected = true;
+    }
+
+    weightedSum += (long)value * (i * 1000);
+    sum += value;
+  }
+
+  // Handle Off-Track Condition (Keep turning toward last known error)
+  if (!lineDetected) {
+    if (lastError < 0) return 0;       // Hard Left
+    else return 4000;                  // Hard Right
+  }
+
+  return weightedSum / sum; // Returns 2000 when centered on OUT3
+}
+
+// Drive Motors Function (L298N)
+void setMotorSpeeds(int leftSpeed, int rightSpeed) {
+  // Left Motor Direction
+  if (leftSpeed >= 0) {
+    digitalWrite(IN1, HIGH);
+    digitalWrite(IN2, LOW);
+  } else {
+    digitalWrite(IN1, LOW);
+    digitalWrite(IN2, HIGH);
+    leftSpeed = -leftSpeed;
+  }
+
+  // Right Motor Direction
+  if (rightSpeed >= 0) {
+    digitalWrite(IN3, HIGH);
+    digitalWrite(IN4, LOW);
+  } else {
+    digitalWrite(IN3, LOW);
+    digitalWrite(IN4, HIGH);
+    rightSpeed = -rightSpeed;
+  }
+
+  // Apply PWM Speeds
+  ledcWrite(ENA, leftSpeed);
+  ledcWrite(ENB, rightSpeed);
+}
+
+// Stop Both Motors
+void stopMotors() {
+  digitalWrite(IN1, LOW);
+  digitalWrite(IN2, LOW);
+  digitalWrite(IN3, LOW);
+  digitalWrite(IN4, LOW);
+  ledcWrite(ENA, 0);
+  ledcWrite(ENB, 0);
+}
